@@ -1,0 +1,8 @@
+# files that run inside WSL must keep LF line endings
+*.sh text eol=lf
+*.py text eol=lf
+payload/llarpctl text eol=lf
+payload/LLARP_COMMIT text eol=lf
+*.signed binary
+*.ps1 text eol=crlf
+*.cs text eol=crlf
