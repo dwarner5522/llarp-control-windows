@@ -414,6 +414,49 @@ namespace LlarpControl
             Proc.Run(Proc.System32("route.exe"), "DELETE " + network + " MASK " + mask, 30000);
         }
 
+        public static ProcResult RouteAdd(string network, string mask, string gateway, int ifIndex)
+        {
+            if (ifIndex <= 0) return RouteAdd(network, mask, gateway);
+            RouteDelete(network, mask);
+            return Proc.Run(Proc.System32("route.exe"), "ADD " + network + " MASK " + mask
+                + " " + gateway + " METRIC 1 IF " + ifIndex, 30000);
+        }
+
+        static readonly Regex GatewayLine = new Regex(@"^(\d+\.\d+\.\d+\.\d+)\s+(\d+)\s*$", RegexOptions.Multiline);
+
+        /// The next hop and interface Windows uses for internet traffic right now (the home
+        /// router, or another VPN such as a Tailscale exit node). Asked before our own routes go in.
+        public static bool DefaultGateway(out string gateway, out int ifIndex)
+        {
+            gateway = null;
+            ifIndex = 0;
+            var r = Proc.PowerShell(
+                "Find-NetRoute -RemoteIPAddress 9.9.9.9 | Where-Object { $_.NextHop } | " +
+                "Select-Object -First 1 | ForEach-Object { \"$($_.NextHop) $($_.InterfaceIndex)\" }");
+            var m = GatewayLine.Match(r.Out.Trim());
+            if (!m.Success || m.Groups[1].Value == "0.0.0.0") return false;
+            gateway = m.Groups[1].Value;
+            ifIndex = int.Parse(m.Groups[2].Value);
+            return true;
+        }
+
+        /// The two halves of the internet into WSL: more specific than any 0.0.0.0/0, so they win
+        /// without touching it, and LAN/WSL/Tailscale routes (more specific still) stay direct.
+        public static ProcResult VpnRoutesAdd(string wslIp)
+        {
+            var a = RouteAdd("0.0.0.0", "128.0.0.0", wslIp);
+            if (!a.Ok) return a;
+            var b = RouteAdd("128.0.0.0", "128.0.0.0", wslIp);
+            if (!b.Ok) RouteDelete("0.0.0.0", "128.0.0.0");
+            return b;
+        }
+
+        public static void VpnRoutesDelete()
+        {
+            RouteDelete("0.0.0.0", "128.0.0.0");
+            RouteDelete("128.0.0.0", "128.0.0.0");
+        }
+
         /// Send .loki and .snode lookups to llarpd's DNS (Name Resolution Policy Table).
         public static ProcResult NrptAdd(string server)
         {
@@ -606,10 +649,97 @@ namespace LlarpControl
         static void Teardown(Dictionary<string, object> st)
         {
             if (st == null) return;
+            if (J.Bool(st, "vpn_on")) WinNet.VpnRoutesDelete();
+            foreach (var peer in J.Arr(st, "vpn_peers")) WinNet.RouteDelete(peer.ToString(), "255.255.255.255");
             string net = J.Str(st, "route_net"), mask = J.Str(st, "route_mask");
             if (net != null && mask != null) WinNet.RouteDelete(net, mask);
             if (J.Bool(st, "nrpt")) WinNet.NrptRemove();
             if (J.Bool(st, "firewall")) WinNet.FirewallRemove();
+        }
+
+        /// If a host run was killed (no clean exit), remove the routes it left behind. Without
+        /// this a VPN route into WSL would leave Windows without internet.
+        public static void CleanupStale()
+        {
+            if (IsRunning()) return;
+            var st = ReadState();
+            if (st == null) return;
+            Teardown(st);
+            try { File.Delete(Paths.HostState); } catch (Exception) { }
+        }
+
+        // ---- VPN: all of Windows' internet traffic through llarpd's exit
+
+        class VpnState
+        {
+            public bool On;
+            public string Gateway;
+            public int IfIndex;
+            public readonly HashSet<string> Peers = new HashSet<string>();
+        }
+
+        /// Follow llarpd's VPN state. Its relays get /32 routes via the real gateway (the same
+        /// ones llarpd pokes inside WSL); once they're in, 0.0.0.0/1 + 128.0.0.0/1 go into WSL.
+        static void VpnTick(Dictionary<string, object> st, VpnState vpn, string wslIp)
+        {
+            var r = Wsl.Ctl("winhost", "info");
+            var info = r.Ok ? J.Parse(r.Out) : null;
+            if (info == null) return; // try again next tick
+            var v = J.Obj(info, "vpn");
+            var peers = J.Arr(v, "peers").Select(x => x.ToString()).ToList();
+            bool want = v != null && J.Bool(v, "routed") && peers.Count > 0;
+            st["vpn_exit"] = J.Str(v, "exit");
+            st["vpn_state"] = J.Str(v, "state");
+
+            if (!want)
+            {
+                if (vpn.On || vpn.Peers.Count > 0) VpnOff(st, vpn);
+                return;
+            }
+            if (vpn.Gateway == null)
+            {
+                string gw;
+                int ifIndex;
+                if (!WinNet.DefaultGateway(out gw, out ifIndex))
+                {
+                    st["vpn_error"] = "no default gateway found on Windows";
+                    return;
+                }
+                vpn.Gateway = gw;
+                vpn.IfIndex = ifIndex;
+                st["vpn_gateway"] = gw;
+            }
+            foreach (var gone in vpn.Peers.Where(p => !peers.Contains(p)).ToList())
+            {
+                WinNet.RouteDelete(gone, "255.255.255.255");
+                vpn.Peers.Remove(gone);
+            }
+            foreach (var peer in peers.Where(p => !vpn.Peers.Contains(p)))
+            {
+                if (WinNet.RouteAdd(peer, "255.255.255.255", vpn.Gateway, vpn.IfIndex).Ok) vpn.Peers.Add(peer);
+            }
+            st["vpn_peers"] = vpn.Peers.ToList();
+            if (!vpn.On && vpn.Peers.Count > 0)
+            {
+                var res = WinNet.VpnRoutesAdd(wslIp);
+                vpn.On = res.Ok;
+                if (res.Ok) st.Remove("vpn_error");
+                else st["vpn_error"] = "route: " + res.Text;
+            }
+            st["vpn_on"] = vpn.On;
+        }
+
+        static void VpnOff(Dictionary<string, object> st, VpnState vpn)
+        {
+            if (vpn.On) WinNet.VpnRoutesDelete(); // first, so traffic never loops
+            foreach (var p in vpn.Peers) WinNet.RouteDelete(p, "255.255.255.255");
+            vpn.On = false;
+            vpn.Gateway = null;
+            vpn.IfIndex = 0;
+            vpn.Peers.Clear();
+            st["vpn_on"] = false;
+            st["vpn_peers"] = new List<string>();
+            st.Remove("vpn_gateway");
         }
 
         static void Error(string text)
@@ -659,13 +789,18 @@ namespace LlarpControl
                         p.BeginErrorReadLine();
                         p.BeginOutputReadLine();
                         bool connected = false;
-                        int wait = 1500;
-                        while (!p.WaitForExit(wait))
+                        var vpn = new VpnState();
+                        while (!p.WaitForExit(connected ? 2000 : 1500))
                         {
-                            wait = 3000;
                             if (connected)
                             {
-                                if (relay != null) { st["relay_peers"] = relay.PeerCount; WriteState(st); }
+                                if (relay != null) st["relay_peers"] = relay.PeerCount;
+                                else
+                                {
+                                    try { VpnTick(st, vpn, J.Str(st, "wsl_ip")); }
+                                    catch (Exception ex) { st["vpn_error"] = ex.Message; }
+                                }
+                                WriteState(st);
                                 continue;
                             }
                             try

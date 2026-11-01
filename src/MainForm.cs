@@ -27,6 +27,12 @@ namespace LlarpControl
         readonly TextBox address = new TextBox();
         readonly Button copyBtn = Theme.Button("Copy");
         readonly ToggleSwitch exitSwitch = new ToggleSwitch();
+        readonly ComboBox vpnCombo = new ComboBox();
+        readonly Button vpnAuth = Theme.Button("Auth code…");
+        readonly Button vpnForget = Theme.Button("Forget");
+        readonly ToggleSwitch vpnSwitch = new ToggleSwitch();
+        readonly Label vpnStatus = Theme.Wrap("", Theme.Dim);
+        string shownExits;
         readonly Label windowsInfo = Theme.Wrap("", Theme.Dim);
         readonly BorderPanel banner = new BorderPanel();
         readonly Label bannerText = Theme.Wrap("");
@@ -101,6 +107,8 @@ namespace LlarpControl
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             Theme.AddRow(root, BuildHeader());
             Theme.AddRow(root, BuildAddressRow());
+            Theme.AddRow(root, BuildVpnRow());
+            Theme.AddRow(root, vpnStatus);
             Theme.AddRow(root, windowsInfo);
             Theme.AddRow(root, BuildBanner());
             Theme.AddRow(root, BuildExitPanel());
@@ -175,6 +183,37 @@ namespace LlarpControl
             exitSwitch.Toggled += (s, e) => SetExitNode(!exitSwitch.Checked);
             tips.SetToolTip(exitSwitch, "Let other LLARP users route their internet traffic through this PC");
             t.Controls.Add(exitSwitch, 4, 0);
+            return t;
+        }
+
+        Control BuildVpnRow()
+        {
+            var t = new TableLayoutPanel { ColumnCount = 5, RowCount = 1, AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(0, 4, 0, 0) };
+            t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            t.Controls.Add(Theme.Label("VPN via exit:"), 0, 0);
+            vpnCombo.DropDownStyle = ComboBoxStyle.DropDown;
+            vpnCombo.FlatStyle = FlatStyle.Flat;
+            vpnCombo.BackColor = Theme.Well;
+            vpnCombo.ForeColor = Theme.Text;
+            vpnCombo.Font = Theme.Mono;
+            vpnCombo.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            vpnCombo.Margin = new Padding(0, 3, 6, 3);
+            vpnCombo.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter && !vpnSwitch.Checked) { e.SuppressKeyPress = true; ToggleVpn(true); } };
+            tips.SetToolTip(vpnCombo, "An exit node's address, e.g. abc…xyz.loki or name.loki");
+            t.Controls.Add(vpnCombo, 1, 0);
+            vpnAuth.Click += (s, e) => EditExitAuth();
+            tips.SetToolTip(vpnAuth, "Auth code for a private exit");
+            t.Controls.Add(vpnAuth, 2, 0);
+            vpnForget.Click += (s, e) => ForgetExit();
+            tips.SetToolTip(vpnForget, "Remove this exit from the saved list");
+            t.Controls.Add(vpnForget, 3, 0);
+            vpnSwitch.Toggled += (s, e) => ToggleVpn(!vpnSwitch.Checked);
+            tips.SetToolTip(vpnSwitch, "Send all of Windows' internet traffic through this exit node");
+            t.Controls.Add(vpnSwitch, 4, 0);
             return t;
         }
 
@@ -473,6 +512,8 @@ namespace LlarpControl
 
         void OnFirstShown()
         {
+            // a host that was killed may have left routes behind (a VPN route would cut Windows off)
+            Task.Run(() => Host.CleanupStale());
             autostart.Checked = false;
             Task.Run(() => Autostart.Enabled()).ContinueWith(task => { syncing = true; autostart.Checked = task.Result; syncing = false; },
                 TaskScheduler.FromCurrentSynchronizationContext());
@@ -537,13 +578,14 @@ namespace LlarpControl
                     ? "Setup isn't finished: llarpd isn't installed in the LLARP distro yet."
                     : "LLARP isn't set up on this PC yet. Setup installs WSL 2, a Debian distro and llarpd.";
                 SetStatus(setupRunning ? "Setting up…" : "Not set up", setupRunning ? Theme.Busy : Theme.Dim);
-                foreach (Control c in new Control[] { power, restartBtn, exitSwitch, copyBtn }) c.Enabled = false;
+                foreach (Control c in new Control[] { power, restartBtn, exitSwitch, copyBtn, vpnSwitch, vpnCombo, vpnAuth, vpnForget }) c.Enabled = false;
                 address.Text = "";
                 windowsInfo.Visible = false;
+                vpnStatus.Visible = false;
                 exitPanel.Visible = false;
                 return;
             }
-            power.Enabled = exitSwitch.Enabled = true;
+            power.Enabled = exitSwitch.Enabled = vpnSwitch.Enabled = vpnAuth.Enabled = vpnForget.Enabled = true;
 
             bool running = J.Bool(d, "running"), stopping = J.Bool(d, "stopping");
             bool exitNode = J.Bool(d, "exit_node");
@@ -595,6 +637,7 @@ namespace LlarpControl
                 : "Temporary address: it changes every time llarpd starts. Turn on “Keep the same address” in Settings.");
 
             ShowWindowsInfo(d, running, host, hostRunning);
+            ShowVpn(d, running, host, hostRunning);
             exitSwitch.Checked = exitNode;
             ShowExitPanel(d, running, exitNode, addr);
             ShowSettings(d);
@@ -644,6 +687,63 @@ namespace LlarpControl
                 windowsInfo.ForeColor = error == null ? Theme.Busy : Theme.Err;
                 windowsInfo.Text = error ?? "Windows: waiting for llarpd's tunnel…";
             }
+        }
+
+        void ShowVpn(Dictionary<string, object> d, bool running, Dictionary<string, object> host, bool hostRunning)
+        {
+            var exits = J.Arr(d, "exits");
+            string current = J.Str(d, "use_exit");
+            string sig = J.Write(exits);
+            if (sig != shownExits)
+            {
+                shownExits = sig;
+                string typed = vpnCombo.Text;
+                vpnCombo.Items.Clear();
+                foreach (var o in exits)
+                {
+                    var e = o as Dictionary<string, object>;
+                    vpnCombo.Items.Add(J.Str(e, "address"));
+                }
+                vpnCombo.Text = current ?? typed;
+            }
+            else if (current != null && !vpnCombo.Focused && vpnCombo.Text != current)
+            {
+                vpnCombo.Text = current;
+            }
+
+            var v = J.Obj(d, "vpn");
+            string state = J.Str(v, "state") ?? "off";
+            bool on = state != "off";
+            vpnSwitch.Checked = on;
+            vpnCombo.Enabled = !on;
+            vpnStatus.Visible = true;
+            if (!on)
+            {
+                vpnStatus.ForeColor = Theme.Dim;
+                vpnStatus.Text = J.Bool(d, "router_mode") || J.Bool(d, "exit_node")
+                    ? "VPN: not available in router mode or while this PC is an exit node."
+                    : "VPN off. Pick or type an exit's .loki address and turn the switch on to send all of Windows' traffic through it.";
+                return;
+            }
+            Color color = state == "on" ? Theme.Bright : state == "trouble" ? Theme.Err : Theme.Busy;
+            string text = (state == "on" ? "● Connected: " : state == "trouble" ? "● Problem: " : "● ") + J.Str(v, "detail");
+            if (running && state != "pending")
+            {
+                string err = J.Str(host, "vpn_error");
+                if (!hostRunning)
+                    text += " · Windows isn't routed through it (llarpd was started outside LLARP Control)";
+                else if (J.Bool(host, "vpn_on"))
+                    text += " · all Windows traffic goes through it";
+                else if (err != null)
+                {
+                    text += " · Windows: " + err;
+                    color = Theme.Err;
+                }
+                else
+                    text += " · Windows joins once llarpd's tunnel is routed";
+            }
+            vpnStatus.ForeColor = color;
+            vpnStatus.Text = text;
         }
 
         void ShowExitPanel(Dictionary<string, object> d, bool running, bool exitNode, string addr)
@@ -784,6 +884,66 @@ namespace LlarpControl
             restartPending = false;
             wasRunning = false;
             StartDaemon();
+        }
+
+        static string CleanError(ProcResult r, string fallback)
+        {
+            return r.Text.Length > 0 ? r.Text.Replace("error: ", "") : fallback;
+        }
+
+        string TypedExit()
+        {
+            string addr = vpnCombo.Text.Trim();
+            if (addr.Length == 0) Error("Type or pick an exit's address first (something.loki).");
+            return addr.Length == 0 ? null : addr;
+        }
+
+        async void ToggleVpn(bool on)
+        {
+            if (!ready) return;
+            string addr = null;
+            if (on && (addr = TypedExit()) == null) return;
+            UseWaitCursor = true;
+            var r = await Task.Run(() => on ? Wsl.Ctl("vpn", addr) : Wsl.Ctl("vpn", "off"));
+            UseWaitCursor = false;
+            if (!r.Ok)
+            {
+                Error(CleanError(r, "Couldn't change the VPN."));
+                return;
+            }
+            shownExits = null;
+            vpnSwitch.Checked = on;
+            if (J.Bool(dump, "running")) Restart(); // llarpd reads the exit at start
+            else if (on) StartDaemon();
+            else Poll();
+        }
+
+        async void EditExitAuth()
+        {
+            string addr = TypedExit();
+            if (addr == null) return;
+            string code = InputDialog.Ask(this, "Exit auth code",
+                "Auth code for " + addr + "\nOnly needed for private exits. Leave empty for public ones.", "", true);
+            if (code == null) return;
+            var r = await Task.Run(() => Wsl.Ctl("vpn", "save", addr, "--auth", code));
+            if (!r.Ok)
+            {
+                Error(CleanError(r, "Couldn't save the auth code."));
+                return;
+            }
+            shownExits = null;
+            string current = J.Str(dump, "use_exit");
+            if (current != null && J.Bool(dump, "running") && r.Out.Contains(current)) Restart(); // apply the new code
+            else Poll();
+        }
+
+        void ForgetExit()
+        {
+            string addr = TypedExit();
+            if (addr == null) return;
+            shownExits = null;
+            vpnCombo.Text = "";
+            Ctl(false, "vpn", "forget", addr);
         }
 
         async void SetExitNode(bool on)

@@ -19,6 +19,8 @@ import llarp_core as core  # noqa: E402
 from llarp_core import LlarpError  # noqa: E402
 
 SERVICE_NAME = "llarp-control"
+# inside WSL, LLARP Control for Windows restarts llarpd so Windows stays connected to it
+WSL_RESTART_HINT = "apply it by restarting llarpd from LLARP Control (or: llarpctl restart from a Windows Command Prompt)"
 
 USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
@@ -207,7 +209,9 @@ def cmd_exit(ctl, args):
     for n in ctl.set_exit_node(enable):
         print(n)
     print(f"exit node {on_off(enable)}")
-    if ctl.is_running():
+    if ctl.is_running() and core.IS_WSL:
+        print(WSL_RESTART_HINT)
+    elif ctl.is_running():
         print("restarting llarpd to apply")
         cmd_restart(ctl, argparse.Namespace(wait=20 if enable else 0))
     if enable:
@@ -237,6 +241,14 @@ def cmd_vpn(ctl, args):
         ctl.forget_exit(args.address)
         print(f"forgot {ctl.normalize_exit(args.address)}")
         return
+    if target == "save":
+        if not args.address:
+            raise LlarpError("which exit? llarpctl vpn save ADDRESS [--auth CODE]")
+        entry = ctl.remember_exit(args.address, args.auth)
+        print(f"saved {entry['address']}" + (" (auth code set)" if entry.get("auth") else ""))
+        if ctl.settings.get("use_exit") == entry["address"]:
+            restart_hint(ctl)
+        return
     if target == "off":
         was = ctl.settings.get("use_exit")
         ctl.set_vpn(None)
@@ -249,6 +261,10 @@ def cmd_vpn(ctl, args):
             target = saved[0]["address"]
         address = ctl.set_vpn(target, args.auth)
         print(f"VPN on via {address}")
+    if core.IS_WSL:
+        # LLARP Control for Windows restarts llarpd itself, so Windows gets routed through it too
+        print(WSL_RESTART_HINT if ctl.is_running() else dim("start llarpd to connect: llarpctl start"))
+        return
     was_running = ctl.is_running()
     if was_running:
         print("restarting llarpd to apply")
@@ -355,6 +371,8 @@ def cmd_dump(ctl, _args):
         data_dir=str(ctl.data_dir()),
         log_file=str(core.LOG_FILE),
         wsl=core.IS_WSL,
+        use_exit=ctl.settings.get("use_exit"),
+        exits=[{"address": e["address"], "auth_set": bool(e.get("auth"))} for e in ctl.saved_exits()],
     )
     print(json.dumps(st))
 
@@ -483,9 +501,10 @@ def build_parser():
     s = sub.add_parser("vpn", help="route your internet traffic through a .loki exit node",
                        description="llarpctl vpn ADDRESS.loki [--auth CODE]   connect (starts llarpd if needed)\n"
                                    "llarpctl vpn on | off                       reconnect to the last exit / disconnect\n"
-                                   "llarpctl vpn status | list | forget ADDRESS",
+                                   "llarpctl vpn status | list | forget ADDRESS\n"
+                                   "llarpctl vpn save ADDRESS --auth CODE       remember an exit (and its auth code) without connecting",
                        formatter_class=argparse.RawDescriptionHelpFormatter)
-    s.add_argument("target", nargs="?", metavar="ADDRESS|on|off|status|list|forget")
+    s.add_argument("target", nargs="?", metavar="ADDRESS|on|off|status|list|forget|save")
     s.add_argument("address", nargs="?", help=argparse.SUPPRESS)
     s.add_argument("--auth", help="auth code for a private exit (\"\" clears it)")
     s.add_argument("-w", "--wait", type=int, default=30, metavar="SECS", help="wait for the connection (default 30)")

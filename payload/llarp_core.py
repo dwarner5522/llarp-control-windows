@@ -1125,6 +1125,27 @@ class Controller:
         ]
 
     @staticmethod
+    def _mss_rule(tun):
+        # Windows sends full-size packets; clamp TCP to what fits the tunnel (best effort)
+        return ["-t", "mangle", "FORWARD", "-o", tun, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
+                "-j", "TCPMSS", "--clamp-mss-to-pmtu"]
+
+    @staticmethod
+    def wsl_peer_routes(eth):
+        """Host routes llarpd's route poker added for its relays while routing through an
+        exit (`<ip> via <gateway> dev <eth>`): the Windows host must send these direct too."""
+        try:
+            out = subprocess.run(["ip", "-4", "route", "show"], capture_output=True, text=True).stdout
+        except OSError:
+            return []
+        peers = []
+        for line in out.splitlines():
+            m = re.match(r"^(\d+\.\d+\.\d+\.\d+) via \S+ dev (\S+)", line)
+            if m and m.group(2) == eth and is_public_ipv4(m.group(1)):
+                peers.append(m.group(1))
+        return sorted(set(peers))
+
+    @staticmethod
     def _iptables(rule, op):
         """op: -C (check), -A (append) or -D (delete). Returns the CompletedProcess."""
         if rule[0] == "-t":
@@ -1159,6 +1180,7 @@ class Controller:
         if applied and applied != wanted and enable is not None:
             for rule in self._bridge_rules(*applied):
                 self._iptables(rule, "-D")
+            self._iptables(self._mss_rule(applied[0]), "-D")
             self._update_state(winbridge=None)
             applied = None
         if wanted and applied != wanted:
@@ -1171,6 +1193,9 @@ class Controller:
                     res = self._iptables(rule, "-A")
                     if res.returncode != 0:
                         raise LlarpError(f"iptables failed: {(res.stderr or res.stdout).strip()}")
+            mss = self._mss_rule(tun)
+            if self._iptables(mss, "-C").returncode != 0:
+                self._iptables(mss, "-A")
             self._update_state(winbridge=wanted)
             applied = wanted
             self.note(f"Windows host: forwarding {eth} -> {tun} ({rng})")
@@ -1179,6 +1204,18 @@ class Controller:
             dns_ok = bool(wsl_ip) and f"bind={wsl_ip}:53" in self.override_file().read_text()
         except OSError:
             dns_ok = False
+        # VPN through an exit: llarpd sends everything into its tunnel once 0.0.0.0/1 points
+        # there; its relays stay reachable via host routes the Windows side mirrors
+        vpn = None
+        use_exit = self.settings.get("use_exit")
+        if use_exit and running and not router:
+            routed = bool(tun) and half_default_route_dev() == tun
+            vpn = {
+                "exit": use_exit,
+                "state": self.vpn_status()["state"],
+                "routed": routed,
+                "peers": self.wsl_peer_routes(eth) if routed and eth else [],
+            }
         return {
             "running": running,
             "router_mode": router,
@@ -1188,6 +1225,7 @@ class Controller:
             "dns": wsl_ip if running and dns_ok and not router else None,
             "public_port": int(self.settings.get("public_port") or 1090),
             "bridged": applied is not None,
+            "vpn": vpn,
         }
 
     # ---- config generation

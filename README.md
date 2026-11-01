@@ -47,8 +47,23 @@ From a Command Prompt, `llarpctl …` runs llarpctl inside the distro (`llarpctl
 `llarpctl log -f`, `llarpctl bootstrap list`, …). `llarpctl start` goes through the app so
 Windows gets connected.
 
-**Not supported yet:** using an exit as a VPN for all of Windows' traffic. Routing everything
-into WSL would loop llarpd's own traffic back on itself.
+### VPN through an exit node
+
+The **VPN via exit** row sends all of Windows' internet traffic through a `.loki` exit node.
+Type or pick the exit's address, set an auth code for a private exit, and turn the switch on.
+llarpd restarts to connect.
+
+Once llarpd routes into the exit inside WSL, the app routes `0.0.0.0/1` and `128.0.0.0/1` on
+Windows into the distro. Your LAN, WSL and other VPN ranges (e.g. Tailscale's) stay direct.
+llarpd's own traffic to its relays must not go into the tunnel, or it would loop back on
+itself. llarpd adds a host route inside WSL for each relay it connects to. The app copies
+those routes to Windows, via the route Windows used before the VPN (your router, or another
+VPN's exit). It keeps them in sync while llarpd runs and removes everything when the VPN or
+llarpd stops. If the app is killed while the VPN is on, the routes are cleaned up the next
+time it opens or starts llarpd.
+
+DNS: lookups go to whatever DNS server Windows already uses. If that's on your LAN (e.g. your
+router), your lookups don't go through the exit.
 
 ## Files
 

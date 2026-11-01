@@ -425,7 +425,7 @@ namespace LlarpControl
     {
         readonly TextBox entry;
 
-        InputDialog(string title, string prompt, string placeholder)
+        InputDialog(string title, string prompt, string placeholder, bool secret)
         {
             Text = title;
             BackColor = Theme.Bg;
@@ -444,6 +444,7 @@ namespace LlarpControl
             entry = Theme.Entry(true);
             entry.Width = 460;
             entry.Text = placeholder ?? "";
+            entry.UseSystemPasswordChar = secret;
             Theme.AddRow(t, entry);
             var buttons = new FlowLayoutPanel { FlowDirection = FlowDirection.RightToLeft, AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(0, 10, 0, 0) };
             var ok = Theme.Button("OK", true);
@@ -458,9 +459,9 @@ namespace LlarpControl
             CancelButton = cancel;
         }
 
-        public static string Ask(IWin32Window owner, string title, string prompt, string initial = null)
+        public static string Ask(IWin32Window owner, string title, string prompt, string initial = null, bool secret = false)
         {
-            using (var d = new InputDialog(title, prompt, initial))
+            using (var d = new InputDialog(title, prompt, initial, secret))
                 return d.ShowDialog(owner) == DialogResult.OK ? d.entry.Text.Trim() : null;
         }
     }
