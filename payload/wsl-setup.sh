@@ -26,15 +26,34 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 grep -qi microsoft /proc/sys/kernel/osrelease || warn "this doesn't look like WSL"
 [ -c /dev/net/tun ] || warn "/dev/net/tun is missing; llarpd needs WSL 2 (wsl --set-version LLARP 2)"
 
+# WSL resolves names through a DNS forwarder on the Windows host. Some setups leave it
+# unanswered (e.g. another VPN such as Tailscale taking over Windows DNS on Windows 10);
+# then this distro, and only this one, uses public resolvers instead.
+fix_dns() {
+    getent hosts deb.debian.org >/dev/null 2>&1 && return 0
+    warn "DNS through Windows doesn't answer in WSL; using public resolvers (Quad9, Cloudflare) in the LLARP distro"
+    if grep -q '^\[network\]' /etc/wsl.conf 2>/dev/null; then
+        sed -i '/^generateResolvConf/d; /^\[network\]/a generateResolvConf = false' /etc/wsl.conf
+    else
+        printf '\n[network]\ngenerateResolvConf = false\n' >> /etc/wsl.conf
+    fi
+    rm -f /etc/resolv.conf # a symlink to WSL's generated file
+    printf '# written by LLARP Control: DNS through Windows did not answer\nnameserver 9.9.9.9\nnameserver 1.1.1.1\n' > /etc/resolv.conf
+    getent hosts deb.debian.org >/dev/null 2>&1 || die "no working DNS in WSL; check this PC's internet connection"
+}
+
 # ---------------------------------------------------------------- 1. llarpd
 if [ "$MODE" != --files-only ]; then
     step "Installing packages"
+    fix_dns
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -q
+    # geoip-database: llarpd (built with GeoIP) crashes picking path hops without GeoIP.dat
     apt-get install -y -q --no-install-recommends \
         build-essential cmake ninja-build git pkg-config ca-certificates file \
-        libuv1-dev libsodium-dev libjemalloc-dev libssl-dev libgeoip-dev \
+        libuv1-dev libsodium-dev libjemalloc-dev libssl-dev libgeoip-dev geoip-database \
         python3 iproute2 iptables procps
+    [ -f /usr/share/GeoIP/GeoIP.dat ] || die "/usr/share/GeoIP/GeoIP.dat is missing (package geoip-database); llarpd crashes without it"
 
     if [ "$MODE" != --force-build ] && [ -x "$LLARPD" ] && "$LLARPD" --version 2>/dev/null | grep -q -- "$TAG"; then
         step "llarpd $TAG is already installed; skipping the build"
