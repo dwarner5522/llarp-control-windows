@@ -13,6 +13,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import time
 import urllib.parse
@@ -68,10 +69,17 @@ EXIT_REACHED_RE = re.compile(r"OBContext:([" + B32Z + r"]{52}\.loki) send intro 
 NO_RELAYS_RE = re.compile(r"no first hop candidate|did not build path, no hops available")
 # the exit answered but we can't read it: almost always mismatched llarpd versions
 UNREADABLE_EXIT_RE = re.compile(r"failed to decrypt message from ([" + B32Z + r"]{52}\.loki)")
+# we reached the exit's introset and sent to it, but it never answered
+SILENT_EXIT_RE = re.compile(r"OBContext:([" + B32Z + r"]{52}\.loki) half open state")
 PATH_BUILT_RE = re.compile(r"\bis built, took\b")
 NO_RELAYS_WINDOW = 20  # seconds
 STARTUP_GRACE = 30  # seconds after start when "no relays yet" is normal
 EXIT_TROUBLE_WINDOW = 90  # seconds an exit error stays relevant
+# proving the exit passes traffic: TCP connects through the tunnel, cached this long
+PROBE_TARGETS = (("1.1.1.1", 443), ("9.9.9.9", 443))
+PROBE_TIMEOUT = 4  # seconds per target
+PROBE_EVERY = 15  # seconds
+EXIT_ANSWER_GRACE = 45  # seconds after start before a silent exit counts as trouble
 IPV4_RANGE_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}/\d{1,2}$")
 IFACE_RE = re.compile(r"^[\w.-]+$")
 WINDOWS_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
@@ -220,6 +228,27 @@ def half_default_route_dev():
         return None
     m = re.search(r"\bdev (\S+)", out)
     return m.group(1) if m else None
+
+
+RESOLV_CONF = Path("/etc/resolv.conf")
+WSL_CONF = Path("/etc/wsl.conf")
+PUBLIC_RESOLVERS = "# written by LLARP Control: DNS through Windows did not answer\nnameserver 9.9.9.9\nnameserver 1.1.1.1\n"
+
+
+def ensure_wsl_dns():
+    """Inside the LLARP distro: once setup has taken DNS over from WSL (generateResolvConf =
+    false, because Windows' DNS forwarder didn't answer), keep /etc/resolv.conf in place.
+    Returns True if it had to be rewritten."""
+    try:
+        if not re.search(r"^\s*generateResolvConf\s*=\s*false\b", WSL_CONF.read_text(), re.I | re.M):
+            return False
+        if RESOLV_CONF.exists() and RESOLV_CONF.read_text().strip():
+            return False
+        RESOLV_CONF.unlink(missing_ok=True)  # also a dangling symlink
+        RESOLV_CONF.write_text(PUBLIC_RESOLVERS)
+        return True
+    except OSError:
+        return False
 
 
 def wsl_host_ip():
@@ -404,7 +433,7 @@ class Controller:
     def _reset_scan(self):
         self._scan.update(
             address=None, range=None, tun=None, exit_trouble=None, no_relays=None, path_built=None,
-            exits_reached=set(), unreadable=None,
+            exits_reached=set(), unreadable=None, silent=None,
         )
 
     def scan_log(self):
@@ -447,6 +476,9 @@ class Controller:
             m = UNREADABLE_EXIT_RE.search(line)
             if m:
                 sc["unreadable"] = (time.time(), m.group(1))
+            m = SILENT_EXIT_RE.search(line)
+            if m:
+                sc["silent"] = (time.time(), m.group(1))
             m = EXIT_REACHED_RE.search(line)
             if m:
                 sc["exits_reached"].add(m.group(1))
@@ -610,6 +642,8 @@ class Controller:
         if problem:
             raise LlarpError(problem)
         self._write_override()
+        if IS_WSL and ensure_wsl_dns():
+            self.note(f"{RESOLV_CONF} was missing; wrote public resolvers (Quad9, Cloudflare)")
         cmd, env, files = self._command_and_env()
 
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -927,6 +961,27 @@ class Controller:
         self.note(f"VPN on via {entry['address']}")
         return entry["address"]
 
+    def probe_exit(self, use_exit):
+        """True if a TCP connection through the tunnel (to a well-known public address) works.
+        Run at most every PROBE_EVERY seconds per llarpd run; the result is kept in the state
+        file so every front end shares it."""
+        st = self.state()
+        cached = st.get("exit_probe") or {}
+        now = time.time()
+        if (cached.get("exit") == use_exit and cached.get("started_at") == st.get("started_at")
+                and now - cached.get("at", 0) < PROBE_EVERY):
+            return bool(cached.get("ok"))
+        ok = False
+        for target in PROBE_TARGETS:
+            try:
+                socket.create_connection(target, timeout=PROBE_TIMEOUT).close()
+                ok = True
+                break
+            except OSError:
+                continue
+        self._update_state(exit_probe={"exit": use_exit, "started_at": st.get("started_at"), "at": now, "ok": ok})
+        return ok
+
     def vpn_status(self):
         """{"exit", "state": off|stopped|pending|connecting|on|trouble, "detail"}.
 
@@ -953,6 +1008,14 @@ class Controller:
                 "detail": f"{use_exit} answers but its replies can't be read; it probably runs a different "
                 "llarpd version (compare `llarpd --version` on both machines)",
             }
+        silent = sc["silent"]
+        if silent and now - silent[0] < EXIT_TROUBLE_WINDOW and (silent[1] == use_exit or not B32Z_ADDR_RE.match(use_exit)):
+            return {
+                "exit": use_exit,
+                "state": "trouble",
+                "detail": f"{use_exit} doesn't answer: it may be offline, not running as an exit, or need an "
+                "auth code (still retrying)",
+            }
         if sc["no_relays"] and now - sc["no_relays"] < NO_RELAYS_WINDOW and not starting and not recent_path:
             return {
                 "exit": use_exit,
@@ -962,7 +1025,18 @@ class Controller:
         if sc["exit_trouble"] and now - sc["exit_trouble"][0] < EXIT_TROUBLE_WINDOW and not reached:
             return {"exit": use_exit, "state": "trouble", "detail": f"can't reach {use_exit} yet (still retrying)"}
         if routed and reached:
-            return {"exit": use_exit, "state": "on", "detail": f"internet traffic goes through {use_exit}"}
+            # llarpd logs nothing when the exit answers, so prove it: does traffic get through?
+            if self.probe_exit(use_exit):
+                return {"exit": use_exit, "state": "on", "detail": f"internet traffic goes through {use_exit}"}
+            started = self.state().get("started_at") or 0
+            if now - started < EXIT_ANSWER_GRACE:
+                return {"exit": use_exit, "state": "connecting", "detail": f"waiting for {use_exit} to answer…"}
+            return {
+                "exit": use_exit,
+                "state": "trouble",
+                "detail": f"{use_exit} was found, but no traffic gets through it: it may be offline, "
+                "not running as an exit, or need an auth code (still retrying)",
+            }
         if routed:
             return {"exit": use_exit, "state": "connecting", "detail": f"looking for {use_exit} on the network…"}
         return {"exit": use_exit, "state": "connecting", "detail": f"connecting to {use_exit}…"}

@@ -740,7 +740,7 @@ namespace LlarpControl
                     color = Theme.Err;
                 }
                 else
-                    text += " · Windows joins once llarpd's tunnel is routed";
+                    text += " · Windows keeps its normal connection until traffic gets through the exit";
             }
             vpnStatus.ForeColor = color;
             vpnStatus.Text = text;

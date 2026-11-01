@@ -687,7 +687,10 @@ namespace LlarpControl
             if (info == null) return; // try again next tick
             var v = J.Obj(info, "vpn");
             var peers = J.Arr(v, "peers").Select(x => x.ToString()).ToList();
-            bool want = v != null && J.Bool(v, "routed") && peers.Count > 0;
+            // switch Windows over only once the exit has proven it passes traffic, so a dead exit
+            // doesn't cut the PC off; once on, stay on while llarpd keeps routing (VPN semantics)
+            bool want = v != null && J.Bool(v, "routed") && peers.Count > 0
+                        && (vpn.On || J.Str(v, "state") == "on");
             st["vpn_exit"] = J.Str(v, "exit");
             st["vpn_state"] = J.Str(v, "state");
 
