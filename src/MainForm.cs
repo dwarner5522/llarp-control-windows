@@ -622,7 +622,14 @@ namespace LlarpControl
                 if (J.Bool(d, "router_mode")) text += " · snode";
                 if (exitNode) text += " · exit node";
                 if (J.Bool(d, "changes_pending")) text += " · restart to apply changes";
-                SetStatus(text, Theme.Bright);
+                var health = J.Obj(d, "health");
+                if (J.Bool(health, "stuck"))
+                {
+                    // the watchdog in llarpctl start --foreground restarts it within a minute
+                    text += " · stuck: no paths for " + (int)((J.Num(health, "for") ?? 0) / 60) + " min, restarting";
+                    SetStatus(text, Theme.Err);
+                }
+                else SetStatus(text, Theme.Bright);
             }
             else if (startRequested != null) SetStatus("Starting…", Theme.Busy);
             else SetStatus("Stopped", Theme.Dim);

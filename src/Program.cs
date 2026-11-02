@@ -17,8 +17,8 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("LLARP Control")]
 [assembly: AssemblyProduct("LLARP Control")]
 [assembly: AssemblyDescription("Control panel for llarpd (LLARP) on Windows, running in WSL 2")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.1.1.0")]
+[assembly: AssemblyFileVersion("1.1.1.0")]
 
 namespace LlarpControl
 {

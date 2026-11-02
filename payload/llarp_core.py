@@ -49,6 +49,13 @@ LOG_LEVELS = ("trace", "debug", "info", "warn", "error")
 
 STOP_TIMEOUT = 10  # seconds before SIGKILL
 
+# stuck llarpd: its endpoint keeps failing to build paths ("no first hop candidate")
+STUCK_AFTER = 600  # seconds of unbroken failures before it counts as stuck
+STUCK_GAP = 60  # a break longer than this ends the streak
+HEALTH_TAIL_BYTES = 2 << 20  # how much of the end of the log to look at
+WATCHDOG_EVERY = 60  # seconds between checks in run_foreground
+LOG_TIME_RE = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")
+
 # conf.d override written by this app (llarpd loads <data-dir>/conf.d/*.ini)
 OVERRIDE_NAME = "50-llarp-gui.ini"
 GUI_KEYFILE_NAME = "llarp-gui-address.private"
@@ -559,6 +566,7 @@ class Controller:
             "vpn": self.vpn_status(),
             "bootstraps_enabled": len(self.enabled_bootstrap_files()),
             "unmanaged_pids": self.unmanaged_pids(),
+            "health": self.path_health() if pid else {"stuck": False, "for": 0},
         }
 
     def startup_problem(self):
@@ -695,18 +703,78 @@ class Controller:
         return proc.pid
 
     def run_foreground(self):
-        """Run llarpd and wait for it (for systemd). Returns its exit code."""
-        proc = self._launch()
+        """Run llarpd and wait for it (for systemd and LLARP Control for Windows). Returns its
+        exit code. Watchdog: a llarpd stuck unable to build paths (see path_health) is
+        restarted, since it otherwise keeps running, and keeps advertising itself, uselessly."""
+        current = {"proc": self._launch(), "stopping": False}
 
         def forward(sig, _frame):
+            current["stopping"] = True
             self._update_state(stop_requested_at=time.time())
-            proc.send_signal(sig)
+            current["proc"].send_signal(sig)
 
         signal.signal(signal.SIGTERM, forward)
         signal.signal(signal.SIGINT, forward)
-        code = proc.wait()
+        next_check = time.time() + WATCHDOG_EVERY
+        while True:
+            try:
+                code = current["proc"].wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                if time.time() < next_check or current["stopping"]:
+                    continue
+                next_check = time.time() + WATCHDOG_EVERY
+                health = self.path_health()
+                if not health["stuck"]:
+                    continue
+                self.note(f"watchdog: llarpd has failed to build paths for {int(health['for']) // 60} min "
+                          "(no relays to use as first hop); restarting it")
+                current["proc"].terminate()
+                try:
+                    current["proc"].wait(timeout=STOP_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    current["proc"].kill()
+                    current["proc"].wait()
+                if current["stopping"]:
+                    break
+                current["proc"] = self._launch()
+                continue
+            self.note(f"llarpd exited with code {code}")
+            return code
+        code = current["proc"].returncode
         self.note(f"llarpd exited with code {code}")
         return code
+
+    def path_health(self):
+        """{"stuck", "for"}: llarpd's own endpoint has failed to build paths ("no first hop
+        candidate") with no break longer than STUCK_GAP, for at least STUCK_AFTER seconds.
+        A healthy node only logs that during its first seconds. Reads the end of the log only."""
+        result = {"stuck": False, "for": 0}
+        try:
+            size = LOG_FILE.stat().st_size
+            with open(LOG_FILE, "rb") as f:
+                f.seek(max(0, size - HEALTH_TAIL_BYTES))
+                text = f.read().decode(errors="replace")
+        except OSError:
+            return result
+        streak_start = last = None
+        for line in text.splitlines():
+            if "OBContext:" in line or not NO_RELAYS_RE.search(line):
+                continue
+            m = LOG_TIME_RE.match(line)
+            if not m:
+                continue
+            try:
+                t = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+            except ValueError:
+                continue
+            if last is None or t - last > STUCK_GAP:
+                streak_start = t
+            last = t
+        if last is None or time.time() - last > STUCK_GAP:
+            return result  # not failing right now
+        result["for"] = last - streak_start
+        result["stuck"] = result["for"] >= STUCK_AFTER
+        return result
 
     def request_stop(self):
         """Send SIGTERM without waiting. Returns False if it wasn't running."""
