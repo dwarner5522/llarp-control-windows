@@ -514,6 +514,12 @@ namespace LlarpControl
         {
             // a host that was killed may have left routes behind (a VPN route would cut Windows off)
             Task.Run(() => Host.CleanupStale());
+            // WSLg's Remote Desktop client fails with ActiveX errors and isn't needed: turn it off
+            // (written before we first start WSL, so usually no restart is needed)
+            bool guiChanged = false;
+            try { guiChanged = WslConfig.DisableGui(); }
+            catch (Exception) { }
+            if (guiChanged) Task.Run(() => WslConfig.RestartIfIdle());
             autostart.Checked = false;
             Task.Run(() => Autostart.Enabled()).ContinueWith(task => { syncing = true; autostart.Checked = task.Result; syncing = false; },
                 TaskScheduler.FromCurrentSynchronizationContext());

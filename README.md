@@ -21,6 +21,9 @@ everything up:
 4. **llarpctl**, a config, the opennet bootstrap and a permanent address. Then llarpd starts.
 
 It needs about 3 GB of disk space and administrator rights (for routes, DNS rules and the firewall).
+It also turns off WSLg (Linux GUI apps) with `guiApplications=false` in `%USERPROFILE%\.wslconfig`.
+The LLARP distro doesn't use it, and its Remote Desktop client showed "unable to run ActiveX
+controls" errors. If you've set `guiApplications` yourself, it's left alone.
 
 ## How it works
 

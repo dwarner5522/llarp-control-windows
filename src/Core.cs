@@ -337,6 +337,60 @@ namespace LlarpControl
         }
     }
 
+    /// WSLg (Linux GUI apps) starts a Remote Desktop client (msrdc) with every WSL start. The
+    /// LLARP distro has no GUI apps, and that client fails with "Remote Desktop was unable to run
+    /// ActiveX controls" when WSL is started by an elevated program like this one. Turn it off,
+    /// unless the user has chosen a guiApplications setting themselves.
+    static class WslConfig
+    {
+        internal static string PathOverride = null; // tests only
+
+        static string FilePath
+        {
+            get
+            {
+                return PathOverride ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".wslconfig");
+            }
+        }
+
+        /// Returns true if .wslconfig was changed (the change applies after WSL restarts).
+        public static bool DisableGui()
+        {
+            string path = FilePath;
+            string text = File.Exists(path) ? File.ReadAllText(path) : "";
+            if (Regex.IsMatch(text, @"^\s*guiApplications\s*=", RegexOptions.Multiline | RegexOptions.IgnoreCase))
+                return false; // the user decided
+            const string comment = "# added by LLARP Control: WSLg's Remote Desktop client isn't needed by the LLARP distro\r\n";
+            const string setting = "guiApplications=false\r\n";
+            var section = Regex.Match(text, @"^\s*\[wsl2\]\s*$\r?\n?", RegexOptions.Multiline | RegexOptions.IgnoreCase);
+            if (section.Success)
+                text = text.Insert(section.Index + section.Length, comment + setting);
+            else
+                text = text + (text.Length > 0 && !text.EndsWith("\n") ? "\r\n" : "") + comment + "[wsl2]\r\n" + setting;
+            File.WriteAllText(path, text, new UTF8Encoding(false));
+            return true;
+        }
+
+        /// Restart WSL so the setting applies, but only if nothing but an idle LLARP distro would
+        /// be affected. Returns true if it restarted.
+        public static bool RestartIfIdle()
+        {
+            if (Host.IsRunning()) return false;
+            var running = Proc.Run(Wsl.Exe, "--list --running --quiet", 30000);
+            // fails (with a localized message) when nothing is running
+            var names = !running.Ok ? new List<string>()
+                : running.Out.Split('\n').Select(s => s.Trim()).Where(s => s.Length > 0).ToList();
+            if (names.Any(n => !string.Equals(n, Wsl.Distro, StringComparison.OrdinalIgnoreCase))) return false;
+            if (names.Count > 0)
+            {
+                var st = Wsl.Ctl("status", "--json");
+                var d = st.Ok ? J.Parse(st.Out) : null;
+                if (d == null || J.Bool(d, "running")) return false;
+            }
+            return Proc.Run(Wsl.Exe, "--shutdown", 60000).Ok;
+        }
+    }
+
     // ------------------------------------------------------------------ files carried in the exe
 
     static class Payload

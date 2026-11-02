@@ -1,4 +1,4 @@
-// LLARP Control for Windows: entry point and the install/update screen.
+﻿// LLARP Control for Windows: entry point and the install/update screen.
 //
 //   LLARP-Control.exe              install (first run) or open the control panel
 //   LLARP-Control.exe --setup      open the control panel and run the setup
@@ -17,8 +17,8 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("LLARP Control")]
 [assembly: AssemblyProduct("LLARP Control")]
 [assembly: AssemblyDescription("Control panel for llarpd (LLARP) on Windows, running in WSL 2")]
-[assembly: AssemblyVersion("1.1.1.0")]
-[assembly: AssemblyFileVersion("1.1.1.0")]
+[assembly: AssemblyVersion("1.1.2.0")]
+[assembly: AssemblyFileVersion("1.1.2.0")]
 
 namespace LlarpControl
 {
@@ -146,10 +146,10 @@ namespace LlarpControl
                 : "llarpd has no Windows version, so LLARP Control runs it in WSL 2 (a small Linux " +
                   "system built into Windows) and connects it to Windows for you.\n\n" +
                   "Setup will:\n" +
-                  "  •  install WSL 2 if needed (may need one restart; setup then continues by itself)\n" +
-                  "  •  download Debian from Microsoft's WSL list into a separate \"LLARP\" distro\n" +
-                  "  •  build llarpd from source inside it (about 10-30 minutes)\n" +
-                  "  •  start your node: .loki and .snode addresses then work in Windows\n\n" +
+                  "  â€¢  install WSL 2 if needed (may need one restart; setup then continues by itself)\n" +
+                  "  â€¢  download Debian from Microsoft's WSL list into a separate \"LLARP\" distro\n" +
+                  "  â€¢  build llarpd from source inside it (about 10-30 minutes)\n" +
+                  "  â€¢  start your node: .loki and .snode addresses then work in Windows\n\n" +
                   "It needs about 3 GB of disk space and an internet connection.\n" +
                   "Installs to: " + Paths.InstallDir;
             var text = Theme.Label(body);

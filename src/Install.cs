@@ -259,6 +259,7 @@ namespace LlarpControl
         SetupResult EnsureWsl()
         {
             Step("Checking WSL");
+            DisableWslGui(); // before WSL first starts, so its Remote Desktop client never shows up
             if (Wsl.Installed())
             {
                 log("WSL is installed.");
@@ -287,6 +288,20 @@ namespace LlarpControl
             Autostart.SetResume(true);
             log("WSL needs a restart of Windows to finish installing.");
             return SetupResult.NeedsReboot;
+        }
+
+        void DisableWslGui()
+        {
+            try
+            {
+                if (WslConfig.DisableGui())
+                    log("Turned off WSLg (Linux GUI apps) in %USERPROFILE%\\.wslconfig: the LLARP distro doesn't use it, "
+                        + "and its Remote Desktop client showed ActiveX errors.");
+            }
+            catch (Exception ex)
+            {
+                log("warning: couldn't update .wslconfig: " + ex.Message);
+            }
         }
 
         bool EnsureDistro()
