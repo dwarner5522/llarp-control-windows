@@ -65,6 +65,12 @@ VPN's exit). It keeps them in sync while llarpd runs and removes everything when
 llarpd stops. If the app is killed while the VPN is on, the routes are cleaned up the next
 time it opens or starts llarpd.
 
+The VPN only counts as connected once traffic actually gets through the exit. Windows stays
+on its normal connection until then, so a dead exit doesn't cut the PC off. After the exit
+restarts, llarpd can keep a dead session to it. So if no traffic gets through for 3 minutes,
+llarpd is restarted for a fresh session, waiting twice as long after each try that doesn't help
+(up to 30 minutes). A llarpd that can't build paths at all is restarted the same way.
+
 DNS: lookups go to whatever DNS server Windows already uses. If that's on your LAN (e.g. your
 router), your lookups don't go through the exit.
 
@@ -100,3 +106,12 @@ tags like `v1.0.0`.
 
 Use Apps & Features → LLARP Control, or Setup → Uninstall. You can keep the `LLARP` distro (and
 with it your .loki address) or delete it.
+
+## Tests
+
+```sh
+python3 tests/test_watchdog.py          # on Linux, or inside the LLARP distro (needs fcntl)
+```
+
+They cover the watchdog (stuck llarpd, VPN reconnect timing and backoff) and the state file
+under concurrent writers.
